@@ -1,7 +1,14 @@
+#include <SPIFFS.h>
+#include "FS.h"
+
 #include "DHT.h"
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
+#include <DHT_U.h>
 #include <WiFi.h>
 #include <WebServer.h>
-#include <HTTPClient.h> 
+#include <HTTPClient.h>
+#include "html.h"
 
 #if CONFIG_FREERTOS_UNICORE
 #define ARDUINO_RUNNING_CORE 0
@@ -17,14 +24,22 @@
 #define echoPin 18
 #define ledPin 19
 
+#define FORMAT_SPIFFS_IF_FAILED true
+
 long duration;
 float distance;
 
-DHT dht(DHTPIN, DHTTYPE);
+float lastHumidity = 0.0;
 
-//void TaskPushValsDb( void *pvParameters );
-//void TaskSaveHumidityLocally( void *pvParameters );
+long timezone = 1; 
+byte daysavetime = 1;
+
+DHT_Unified dht(DHTPIN, DHTTYPE);
+
+void TaskPushValsDb( void *pvParameters );
+void TaskSaveHumidityLocally( void *pvParameters );
 void TaskBlinkLED( void *pvParameters );
+void TaskHandleWebServer(void *pvParameters);
 
 WebServer server(80);
 WiFiClient client;
@@ -32,23 +47,34 @@ HTTPClient http;
 
 void setup() {
   Serial.begin(115200);
+  dht.begin();
+ 
   xTaskCreatePinnedToCore(
     TaskPushValsDb
-    ,  "DbTask"   // A name just for humans
-    ,  50024  // This stack size can be checked & adjusted by reading the Stack Highwater
+    ,  "DbTask"
+    ,  50024
     ,  NULL
     ,  3  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
     ,  NULL 
     ,  ARDUINO_RUNNING_CORE);
 
-//  xTaskCreatePinnedToCore(
-//    TaskSaveHumidityLocally
-//    ,  "SaveHumidityLocallyTask"
-//    ,  1024  // Stack size
-//    ,  NULL
-//    ,  2  // Priority
-//    ,  NULL 
-//    ,  ARDUINO_RUNNING_CORE);
+  xTaskCreatePinnedToCore(
+    TaskSaveHumidityLocally
+    ,  "SaveHumidityLocallyTask"
+    ,  100024  // Stack size
+    ,  NULL
+    ,  2  // Priority
+    ,  NULL 
+    ,  ARDUINO_RUNNING_CORE);
+
+  xTaskCreatePinnedToCore(
+    TaskHandleWebServer
+    ,  "HandleWebServer"
+    ,  6024  // Stack size
+    ,  NULL
+    ,  3  // Priority
+    ,  NULL 
+    ,  ARDUINO_RUNNING_CORE);
 
   xTaskCreatePinnedToCore(
     TaskBlinkLED
@@ -61,15 +87,24 @@ void setup() {
 
 }
 
-void loop() {
-//  Serial.print("Humidity: ");
-//  Serial.println(getHumidityValue());
-//  Serial.print("LDR: ");
-//  Serial.println(getLDRValue());
-//  Serial.print("Distance: ");
-//  Serial.println(getDistance());
-//  Serial.println();
-//  delay(1000);
+void loop() {}
+
+// ---------------------------------------------- Tasks ----------------------------------------------------------- //
+void TaskBlinkLED(void *pvParameters)
+{
+  (void) pvParameters;
+
+  // Entry point for modifying blink delay value  
+  int delayVal = 1000;
+  
+  pinMode(ledPin, OUTPUT);
+
+  for(;;) {
+      digitalWrite(ledPin, HIGH);
+      vTaskDelay(delayVal);
+      digitalWrite(ledPin, LOW);
+      vTaskDelay(delayVal);
+  }
 }
 
 void TaskPushValsDb(void *pvParameters)
@@ -103,36 +138,85 @@ void TaskPushValsDb(void *pvParameters)
   }
 }
 
-//void TaskSaveHumidityLocally(void *pvParameters)
-//{
-//  (void) pvParameters;
-//
-////  dht.begin();
-//
-//  // Procedure
-//  // Save last value in temporal memory
-//  // Compare current reading to last reading
-//  // If different, then append to an array (possibly 2D to allow timestamp as well)
-//  // Every minute, rewrite local file with array values (and possibly timestamps
-//}
-
-void TaskBlinkLED(void *pvParameters)
+void TaskSaveHumidityLocally(void *pvParameters)
 {
-  (void) pvParameters;
-    
-  int delayVal = 1000;
-  pinMode(ledPin, OUTPUT);
-
+  (void) pvParameters;  
+   
   for(;;) {
-      digitalWrite(ledPin, HIGH);
-      vTaskDelay(delayVal);
-      digitalWrite(ledPin, LOW);
-      vTaskDelay(delayVal);
+    saveDataLocally();
+    vTaskDelay(10000);
   }
 }
 
+void TaskHandleWebServer(void *pvParameters)
+{
+  Serial.println("Task activated");
+
+  (void) pvParameters;
+  server.on("/", displayDashboard);
+  
+  server.begin();
+  Serial.println("HTTP server started");
+  
+  for(;;){
+    server.handleClient();
+  }
+}
+
+// ------------------------------------------------ End of tasks ------------------------------------------------------- //
+
+
+// ------------------------------------------------ Server callbacks ------------------------------------------------------- //
+void displayDashboard(){
+  server.send(200, "text/html", dashboard);
+}
+// ------------------------------------------------ Server callbacks ------------------------------------------------------- //
+
+
+// ------------------------------------------------ Helper functions --------------------------------------------------- //
+void saveDataLocally() {
+   if(WiFi.status()== WL_CONNECTED){
+      if(!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)){
+        Serial.println("SPIFFS Mount Failed");
+        return;
+      }
+
+      configTime(3600*timezone, daysavetime*3600, "time.nist.gov", "0.pool.ntp.org", "1.pool.ntp.org");
+      struct tm tmstruct ;
+      vTaskDelay(2000);
+      tmstruct.tm_year = 0;
+      getLocalTime(&tmstruct, 5000);  
+      
+      String timestamp = String((tmstruct.tm_year)+1900) + "-" + String((tmstruct.tm_mon)+1) + "-" + String(tmstruct.tm_mday) + " " + String(tmstruct.tm_hour-1) + ":" + String(tmstruct.tm_min) + ":" + String(tmstruct.tm_sec);
+      
+      float humidity = getHumidityValue();
+      String value = timestamp + " -> " + humidity + "\r\n";
+      char dataArray[value.length()+1];
+      value.toCharArray(dataArray, value.length()+1);
+      
+      if(lastHumidity != humidity){
+        appendFile(SPIFFS, "/FinalExam.txt", dataArray);
+        lastHumidity = humidity;
+      }
+   }
+}
+
 float getHumidityValue() {
-  return dht.readHumidity();
+  sensor_t sensor;
+  dht.humidity().getSensor(&sensor);
+  
+  sensors_event_t event;
+  dht.humidity().getEvent(&event);
+  return event.temperature;
+}
+
+float getTemperature() {
+  sensor_t sensor;
+  dht.temperature().getSensor(&sensor);
+  
+  sensors_event_t event;
+  dht.temperature().getEvent(&event);
+  return event.temperature;
 }
 
 String getLDRValue() {
@@ -140,24 +224,18 @@ String getLDRValue() {
 }
 
 void postToDb(){
-  String serverName = "http://192.168.102.178:8080/new-reading";
-  digitalWrite(trigPin, LOW);
-  vTaskDelay(2);
-  digitalWrite(trigPin, HIGH);
-  vTaskDelay(10);
-  digitalWrite(trigPin, LOW);
   
-  duration = pulseIn(echoPin, HIGH);
-  distance = duration * 0.034/2;
+  String serverName = "http://192.168.102.178:8080/new-reading";
   
   if(WiFi.status()== WL_CONNECTED){
       // Your Domain name with URL path or IP address with path
       http.begin(client, serverName);
-      
+
       http.addHeader("Content-Type", "application/json");
       // String json = "{\"distance\":\"Isaac_and_Daniel\",\"waterLevel\":\" ";
-      String json = " {\"distance\": \"";
-      json += String(int(distance));
+      String json = " {\"temperature\": \"";
+      Serial.println(getHumidityValue());
+      json += String((getTemperature()));
       json += "\", \"illumination\": \"";
       json += getLDRValue();
       json += "\"}";
@@ -170,4 +248,36 @@ void postToDb(){
       // Free resources
       http.end();
     }
+}
+
+void appendFile(fs::FS &fs, const char * path, const char * message){
+    Serial.printf("Appending to file: %s\r\n", path);
+
+    File file = fs.open(path, FILE_APPEND);
+    if(!file){
+        Serial.println("- failed to open file for appending");
+        return;
+    }
+    if(file.print(message)){
+        Serial.println("- message appended");
+    } else {
+        Serial.println("- append failed");
+    }
+    file.close();
+}
+
+void writeFile(fs::FS &fs, const char * path, const char * message){
+    Serial.printf("Writing file: %s\r\n", path);
+
+    File file = fs.open(path, FILE_WRITE);
+    if(!file){
+        Serial.println("- failed to open file for writing");
+        return;
+    }
+    if(file.print(message)){
+        Serial.println("- file written");
+    } else {
+        Serial.println("- write failed");
+    }
+    file.close();
 }

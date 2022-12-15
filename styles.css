@@ -1,0 +1,48 @@
+.center-header{
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: #05445E;
+}
+.row{
+    margin: 1rem 3rem;
+    display: flex;
+    justify-content: space-evenly;
+}
+.row-vals{
+    margin: 1rem 3rem;
+    display: flex;
+    justify-content: space-evenly;
+}
+.col{
+    margin: 1rem 1rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+.u{
+    text-decoration: underline;
+}
+p,span{
+    font-weight: 300;
+    text-transform: uppercase;
+    text-align: center;
+    color: #05445E;
+}
+.no-top{
+    margin-top: 0px;
+    margin-bottom: 0px;
+}
+.center{
+    justify-content: center;
+}
+.fan-btn{
+    background-color: #05445E;
+    color: white;
+    padding: 1rem;
+    cursor: pointer;
+    border-radius: 5px;
+}
+html{
+    font-family: 'Titillium Web', sans-serif;
+}
